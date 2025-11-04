@@ -1,0 +1,27 @@
+# FastAPI and web server
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+python-multipart>=0.0.6
+pydantic>=2.5.0
+
+# Image processing
+Pillow>=10.0.0
+numpy>=1.24.0
+
+# PyTorch and CUDA 12.8 support
+# Install from PyPI with CUDA 12.1 support (compatible with CUDA 12.8)
+torch>=2.1.0
+torchvision>=0.16.0
+torchaudio>=2.1.0
+
+# Transformers and diffusers
+transformers>=4.51.3
+# Install latest diffusers from git
+git+https://github.com/huggingface/diffusers.git
+
+# Accelerate for model loading
+accelerate>=0.25.0
+
+# Optional: for better performance
+safetensors>=0.4.0
+
