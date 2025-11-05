@@ -14,6 +14,7 @@ export NUM_GPUS_TO_USE=${NUM_GPUS_TO_USE:-$(python3 -c "import torch; print(torc
 export TASK_QUEUE_SIZE=${TASK_QUEUE_SIZE:-100}
 export TASK_TIMEOUT=${TASK_TIMEOUT:-300}
 export MODEL_REPO_ID=${MODEL_REPO_ID:-"Qwen/Qwen-Image-Edit"}
+export USE_PLUS_PIPELINE=${USE_PLUS_PIPELINE:-"false"}
 export HOST=${HOST:-"0.0.0.0"}
 export PORT=${PORT:-8000}
 export WORKERS=${WORKERS:-1}
@@ -48,6 +49,7 @@ echo "  GPUs: $NUM_GPUS_TO_USE"
 echo "  Task Queue Size: $TASK_QUEUE_SIZE"
 echo "  Task Timeout: $TASK_TIMEOUT seconds"
 echo "  Model: $MODEL_REPO_ID"
+echo "  Use Plus Pipeline: $USE_PLUS_PIPELINE"
 echo "=========================================="
 echo ""
 

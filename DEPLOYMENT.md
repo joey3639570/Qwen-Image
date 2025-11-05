@@ -75,6 +75,8 @@ nano .env
 - `TASK_QUEUE_SIZE`: 任務隊列大小（預設：100）
 - `TASK_TIMEOUT`: 任務超時時間（秒，預設：300）
 - `MODEL_REPO_ID`: 模型倉庫 ID（預設：Qwen/Qwen-Image-Edit）
+- `USE_PLUS_PIPELINE`: 是否使用 QwenImageEditPlusPipeline（預設：false）
+  - 設為 `true` 以啟用多圖片編輯功能（需要 MODEL_REPO_ID=Qwen/Qwen-Image-Edit-2509）
 - `HOST`: 服務監聽地址（預設：0.0.0.0）
 - `PORT`: 服務端口（預設：8000）
 
@@ -109,9 +111,25 @@ curl http://localhost:8000/health
 http://your-pod-ip:8000/docs
 ```
 
+## 功能特性
+
+### 單圖片編輯
+- 使用 `Qwen/Qwen-Image-Edit` 模型
+- 端點：`POST /edit` 和 `POST /edit/json`
+- 支援標準圖片編輯功能
+
+### 多圖片編輯
+- 使用 `Qwen/Qwen-Image-Edit-2509` 模型
+- 端點：`POST /edit/multi`
+- 支援 1-3 張圖片同時編輯
+- 需要設置 `USE_PLUS_PIPELINE=true`
+- 支援多種組合：person + person, person + product, person + scene
+
 ## API 端點
 
-### 1. 健康檢查
+### 系統端點
+
+#### 1. 健康檢查
 
 **GET** `/health`
 
@@ -125,7 +143,13 @@ http://your-pod-ip:8000/docs
 }
 ```
 
-### 2. 系統狀態
+**狀態碼**:
+- `200`: 服務正常
+- `503`: 服務未初始化
+
+---
+
+#### 2. 系統狀態
 
 **GET** `/status`
 
@@ -150,11 +174,63 @@ http://your-pod-ip:8000/docs
 }
 ```
 
-### 3. 圖片編輯（Multipart Form）
+---
+
+### 編輯模式資訊端點
+
+#### 3. 獲取編輯模式資訊
+
+**GET** `/edit-mode/{mode}`
+
+獲取指定編輯模式的詳細資訊。
+
+**路徑參數**:
+- `mode` (int, required): 編輯模式編號 (1-16)
+
+**響應示例**:
+```json
+{
+  "mode": 1,
+  "name": "人物 + 人物",
+  "description": "將兩個人物合併到同一個場景中",
+  "requires_multiple_images": true,
+  "requires_controlnet": false,
+  "requires_text_params": false,
+  "min_images": 2,
+  "max_images": 5
+}
+```
+
+---
+
+#### 4. 獲取所有編輯模式
+
+**GET** `/edit-modes`
+
+獲取所有 16 種編輯模式的資訊列表。
+
+**響應示例**:
+```json
+[
+  {
+    "mode": 1,
+    "name": "人物 + 人物",
+    "description": "將兩個人物合併到同一個場景中",
+    ...
+  },
+  ...
+]
+```
+
+---
+
+### 圖片編輯端點
+
+#### 5. 單圖片編輯 (Multipart Form)
 
 **POST** `/edit`
 
-使用 multipart/form-data 上傳圖片進行編輯。
+使用 multipart/form-data 上傳單張圖片進行編輯。
 
 **請求參數**:
 - `image` (file, required): 輸入圖片文件
@@ -187,13 +263,18 @@ curl -X POST "http://localhost:8000/edit" \
 }
 ```
 
-### 4. 圖片編輯（JSON + Base64）
+---
+
+#### 6. 單圖片編輯 (JSON + Base64)
 
 **POST** `/edit/json`
 
 使用 JSON 格式和 base64 編碼圖片進行編輯。
 
-**請求體**:
+**請求參數**:
+- `image_base64` (form-data, required): Base64 編碼的圖片（可包含 data URI 前綴）
+
+**請求體** (JSON):
 ```json
 {
   "prompt": "Change the background to a sunset scene",
@@ -205,22 +286,198 @@ curl -X POST "http://localhost:8000/edit" \
 }
 ```
 
-**請求參數**:
-- `image_base64` (form-data, required): Base64 編碼的圖片
-
 **使用 curl 示例**:
 ```bash
 IMAGE_BASE64=$(base64 -w 0 input.jpg)
 curl -X POST "http://localhost:8000/edit/json" \
-  -H "Content-Type: application/json" \
   -F "image_base64=data:image/jpeg;base64,$IMAGE_BASE64" \
-  -d '{
-    "prompt": "Change the background to a sunset scene",
-    "seed": 42,
-    "true_guidance_scale": 4.0,
-    "num_inference_steps": 50
-  }'
+  -F 'prompt=Change the background to a sunset scene' \
+  -F 'seed=42' \
+  -F 'true_guidance_scale=4.0' \
+  -F 'num_inference_steps=50'
 ```
+
+**響應示例**:
+```json
+{
+  "success": true,
+  "images": [
+    "data:image/png;base64,iVBORw0KGgoAAAANS..."
+  ],
+  "seed": 42,
+  "gpu_id": 0
+}
+```
+
+---
+
+#### 7. 多圖片編輯 (基礎版)
+
+**POST** `/edit/multi`
+
+使用 multipart/form-data 上傳多張圖片（1-3張）進行編輯。需要啟用 `USE_PLUS_PIPELINE=true` 並使用 `Qwen/Qwen-Image-Edit-2509` 模型。
+
+**請求參數**:
+- `images` (file[], required): 輸入圖片文件列表（1-3張）
+- `prompt` (string, required): 編輯指令提示
+- `seed` (int, optional): 隨機種子
+- `randomize_seed` (bool, optional): 是否隨機化種子（預設：false）
+- `true_guidance_scale` (float, optional): 引導縮放係數（預設：4.0，範圍：1.0-10.0）
+- `guidance_scale` (float, optional): 引導縮放係數（用於 plus pipeline，預設：1.0，範圍：1.0-10.0）
+- `num_inference_steps` (int, optional): 推理步數（預設：40，範圍：1-50）
+- `num_images_per_prompt` (int, optional): 每個提示生成的圖片數量（預設：1，範圍：1-4）
+
+**使用 curl 示例**:
+```bash
+curl -X POST "http://localhost:8000/edit/multi" \
+  -F "images=@image1.jpg" \
+  -F "images=@image2.jpg" \
+  -F "prompt=The magician bear is on the left, the alchemist bear is on the right" \
+  -F "seed=42" \
+  -F "true_guidance_scale=4.0" \
+  -F "guidance_scale=1.0" \
+  -F "num_inference_steps=40"
+```
+
+**響應示例**:
+```json
+{
+  "success": true,
+  "images": [
+    "data:image/png;base64,iVBORw0KGgoAAAANS..."
+  ],
+  "seed": 42,
+  "gpu_id": 0
+}
+```
+
+**注意事項**:
+- 需要設置環境變數：
+  ```bash
+  export USE_PLUS_PIPELINE=true
+  export MODEL_REPO_ID=Qwen/Qwen-Image-Edit-2509
+  ```
+- 支援 1-3 張輸入圖片
+
+---
+
+#### 8. 多圖片編輯 (進階版 - 16種模式)
+
+**POST** `/multi-image-editing`
+
+進階多圖片編輯端點，支援 16 種編輯模式，最多 5 張圖片，支援 ControlNet 和文字編輯參數。
+
+**請求參數**:
+- `images` (file[], required): 輸入圖片文件列表（1-5張，根據模式調整）
+- `mode` (int, required): 編輯模式 (1-16)
+  - 模式 1-5: 多圖編輯（需要 2-5 張圖片）
+  - 模式 6-8: 單圖一致性編輯（1 張圖片）
+  - 模式 9-12: 文字編輯（需要 `text_params_json`）
+  - 模式 13-16: ControlNet 控制（需要 `controlnet_image`）
+- `prompt` (string, required): 編輯指令提示
+- `controlnet_image` (file, optional): ControlNet 條件圖（模式 13-16 需要）
+- `seed` (int, optional): 隨機種子
+- `randomize_seed` (bool, optional): 是否隨機化種子（預設：false）
+- `true_guidance_scale` (float, optional): 引導縮放係數（預設：根據模式自動設定）
+- `guidance_scale` (float, optional): 引導縮放係數（預設：根據模式自動設定）
+- `num_inference_steps` (int, optional): 推理步數（預設：根據模式自動設定）
+- `num_images_per_prompt` (int, optional): 每個提示生成的圖片數量（預設：1）
+- `text_params_json` (string, optional): 文字編輯參數 JSON（模式 9-12 需要）
+  ```json
+  {
+    "old_text": "舊文字",
+    "new_text": "新文字",
+    "position": "center",
+    "font_type": "Arial",
+    "color": "red"
+  }
+  ```
+- `additional_params_json` (string, optional): 額外參數 JSON
+  ```json
+  {
+    "positions": ["left", "right"],
+    "style": "realistic",
+    "preserve_features": ["face", "hair"]
+  }
+  ```
+
+**16 種編輯模式說明**:
+
+| 模式 | 名稱 | 說明 | 最小圖片數 | 需要 ControlNet | 需要文字參數 |
+|------|------|------|-----------|----------------|-------------|
+| 1 | 人物 + 人物 | 將兩個人物合併到同一個場景中 | 2 | ❌ | ❌ |
+| 2 | 人物 + 產品 | 將人物和產品組合在一起 | 2 | ❌ | ❌ |
+| 3 | 人物 + 場景 | 將人物放置在場景中 | 2 | ❌ | ❌ |
+| 4 | 產品 + 產品 | 將多個產品組合在一起 | 2 | ❌ | ❌ |
+| 5 | 多物件組合 | 將多個物件組合在一起 | 2 | ❌ | ❌ |
+| 6 | 人物一致性編輯 | 編輯人物時保持身份一致性 | 1 | ❌ | ❌ |
+| 7 | 產品一致性編輯 | 編輯產品時保持產品一致性 | 1 | ❌ | ❌ |
+| 8 | 風格轉換 | 將圖片轉換為不同風格 | 1 | ❌ | ❌ |
+| 9 | 文字替換 | 替換圖片中的文字 | 1 | ❌ | ✅ |
+| 10 | 文字添加 | 在圖片中添加文字 | 1 | ❌ | ✅ |
+| 11 | 文字字體編輯 | 更改文字的字體 | 1 | ❌ | ✅ |
+| 12 | 文字顏色編輯 | 更改文字的顏色 | 1 | ❌ | ✅ |
+| 13 | 深度圖控制 | 使用深度圖控制生成結果 | 1 | ✅ | ❌ |
+| 14 | 邊緣圖控制 | 使用邊緣圖控制生成結果 | 1 | ✅ | ❌ |
+| 15 | 關鍵點控制 | 使用關鍵點控制生成結果 | 1 | ✅ | ❌ |
+| 16 | 草圖控制 | 使用草圖控制生成結果 | 1 | ✅ | ❌ |
+
+**使用 curl 示例** (模式 1: 人物 + 人物):
+```bash
+curl -X POST "http://localhost:8000/multi-image-editing" \
+  -F "images=@person1.jpg" \
+  -F "images=@person2.jpg" \
+  -F "mode=1" \
+  -F "prompt=Two people facing each other in a park" \
+  -F "seed=42" \
+  -F "true_guidance_scale=4.0" \
+  -F "guidance_scale=1.0" \
+  -F "num_inference_steps=40"
+```
+
+**使用 curl 示例** (模式 9: 文字替換):
+```bash
+curl -X POST "http://localhost:8000/multi-image-editing" \
+  -F "images=@image_with_text.jpg" \
+  -F "mode=9" \
+  -F "prompt=Replace the text" \
+  -F 'text_params_json={"old_text": "Hello", "new_text": "Hi"}' \
+  -F "seed=42"
+```
+
+**使用 curl 示例** (模式 13: 深度圖控制):
+```bash
+curl -X POST "http://localhost:8000/multi-image-editing" \
+  -F "images=@input.jpg" \
+  -F "controlnet_image=@depth_map.png" \
+  -F "mode=13" \
+  -F "prompt=Follow the depth structure" \
+  -F "seed=42"
+```
+
+**響應示例**:
+```json
+{
+  "success": true,
+  "images": [
+    "data:image/png;base64,iVBORw0KGgoAAAANS..."
+  ],
+  "seed": 42,
+  "gpu_id": 0,
+  "prompt": "增強後的提示詞",
+  "mode": 1
+}
+```
+
+**注意事項**:
+- 模式 1-5 需要設置：
+  ```bash
+  export USE_PLUS_PIPELINE=true
+  export MODEL_REPO_ID=Qwen/Qwen-Image-Edit-2509
+  ```
+- 模式 9-12 必須提供 `text_params_json`
+- 模式 13-16 必須提供 `controlnet_image`
+- 目前返回模擬回應，待模型端點完成後將實作實際處理
 
 ## 故障排除
 

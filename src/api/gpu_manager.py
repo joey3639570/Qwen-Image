@@ -11,12 +11,12 @@ from multiprocessing import Process, Queue, Event
 
 mp.set_start_method('spawn', force=True)
 
-from diffusers import QwenImageEditPipeline
+from diffusers import QwenImageEditPipeline, QwenImageEditPlusPipeline
 
 
 class EditGPUWorker:
     """GPU Worker for image editing tasks"""
-    def __init__(self, gpu_id, model_repo_id, task_queue, result_queue, stop_event):
+    def __init__(self, gpu_id, model_repo_id, task_queue, result_queue, stop_event, use_plus_pipeline=False):
         self.gpu_id = gpu_id
         self.model_repo_id = model_repo_id
         self.task_queue = task_queue
@@ -24,9 +24,10 @@ class EditGPUWorker:
         self.stop_event = stop_event
         self.device = f"cuda:{gpu_id}"
         self.pipe = None
+        self.use_plus_pipeline = use_plus_pipeline
         
     def initialize_model(self):
-        """Initialize the QwenImageEditPipeline on the specified GPU"""
+        """Initialize the QwenImageEditPipeline or QwenImageEditPlusPipeline on the specified GPU"""
         try:
             torch.cuda.set_device(self.gpu_id)
             if torch.cuda.is_available():
@@ -34,10 +35,19 @@ class EditGPUWorker:
             else:
                 torch_dtype = torch.float32
             
-            self.pipe = QwenImageEditPipeline.from_pretrained(
-                self.model_repo_id, 
-                torch_dtype=torch_dtype
-            )
+            if self.use_plus_pipeline:
+                self.pipe = QwenImageEditPlusPipeline.from_pretrained(
+                    self.model_repo_id, 
+                    torch_dtype=torch_dtype
+                )
+                print(f"GPU {self.gpu_id} initialized with QwenImageEditPlusPipeline (multi-image support)")
+            else:
+                self.pipe = QwenImageEditPipeline.from_pretrained(
+                    self.model_repo_id, 
+                    torch_dtype=torch_dtype
+                )
+                print(f"GPU {self.gpu_id} initialized with QwenImageEditPipeline (single image)")
+            
             self.pipe = self.pipe.to(self.device)
             self.pipe.set_progress_bar_config(disable=True)
             print(f"GPU {self.gpu_id} model initialized successfully")
@@ -47,36 +57,52 @@ class EditGPUWorker:
             return False
     
     def process_task(self, task):
-        """Process a single image editing task"""
+        """Process an image editing task (supports both single and multiple images)"""
         try:
             task_id = task['task_id']
-            image = task['image']
+            images = task['images']  # Can be single image or list of images
             prompt = task['prompt']
             negative_prompt = task.get('negative_prompt', ' ')
             seed = task['seed']
             true_guidance_scale = task['true_guidance_scale']
             num_inference_steps = task['num_inference_steps']
             num_images_per_prompt = task.get('num_images_per_prompt', 1)
+            guidance_scale = task.get('guidance_scale', 1.0)  # For plus pipeline
             
             generator = torch.Generator(device=self.device).manual_seed(seed)
             
             with torch.cuda.device(self.gpu_id):
                 with torch.inference_mode():
-                    output = self.pipe(
-                        image=image,
-                        prompt=prompt,
-                        negative_prompt=negative_prompt,
-                        num_inference_steps=num_inference_steps,
-                        generator=generator,
-                        true_cfg_scale=true_guidance_scale,
-                        num_images_per_prompt=num_images_per_prompt
-                    )
+                    if self.use_plus_pipeline and isinstance(images, list):
+                        # Multi-image editing with QwenImageEditPlusPipeline
+                        output = self.pipe(
+                            image=images,
+                            prompt=prompt,
+                            negative_prompt=negative_prompt,
+                            num_inference_steps=num_inference_steps,
+                            generator=generator,
+                            true_cfg_scale=true_guidance_scale,
+                            guidance_scale=guidance_scale,
+                            num_images_per_prompt=num_images_per_prompt
+                        )
+                    else:
+                        # Single image editing (convert list to single if needed)
+                        single_image = images[0] if isinstance(images, list) else images
+                        output = self.pipe(
+                            image=single_image,
+                            prompt=prompt,
+                            negative_prompt=negative_prompt,
+                            num_inference_steps=num_inference_steps,
+                            generator=generator,
+                            true_cfg_scale=true_guidance_scale,
+                            num_images_per_prompt=num_images_per_prompt
+                        )
                     
-                    images = output.images if isinstance(output.images, list) else [output.images]
+                    result_images = output.images if isinstance(output.images, list) else [output.images]
             
             return {
                 'task_id': task_id,
-                'images': images,
+                'images': result_images,
                 'success': True,
                 'gpu_id': self.gpu_id
             }
@@ -118,15 +144,15 @@ class EditGPUWorker:
 
 
 # Global GPU worker function for spawn mode
-def edit_gpu_worker_process(gpu_id, model_repo_id, task_queue, result_queue, stop_event):
+def edit_gpu_worker_process(gpu_id, model_repo_id, task_queue, result_queue, stop_event, use_plus_pipeline=False):
     """Global function for multiprocessing spawn mode"""
-    worker = EditGPUWorker(gpu_id, model_repo_id, task_queue, result_queue, stop_event)
+    worker = EditGPUWorker(gpu_id, model_repo_id, task_queue, result_queue, stop_event, use_plus_pipeline)
     worker.run()
 
 
 class EditMultiGPUManager:
     """Multi-GPU Manager for image editing tasks"""
-    def __init__(self, model_repo_id="Qwen/Qwen-Image-Edit", num_gpus=None, task_queue_size=100):
+    def __init__(self, model_repo_id="Qwen/Qwen-Image-Edit", num_gpus=None, task_queue_size=100, use_plus_pipeline=False):
         self.model_repo_id = model_repo_id
         self.num_gpus = num_gpus or torch.cuda.device_count()
         self.task_queue = Queue(maxsize=task_queue_size)
@@ -135,8 +161,10 @@ class EditMultiGPUManager:
         self.worker_processes = []
         self.task_counter = 0
         self.pending_tasks = {}
+        self.use_plus_pipeline = use_plus_pipeline
         
-        print(f"Initializing Multi-GPU Manager with {self.num_gpus} GPUs, queue size {task_queue_size}")
+        pipeline_type = "QwenImageEditPlusPipeline (multi-image)" if use_plus_pipeline else "QwenImageEditPipeline (single-image)"
+        print(f"Initializing Multi-GPU Manager with {self.num_gpus} GPUs, queue size {task_queue_size}, pipeline: {pipeline_type}")
         
     def start_workers(self):
         """Start all GPU workers"""
@@ -144,7 +172,7 @@ class EditMultiGPUManager:
             process = Process(
                 target=edit_gpu_worker_process,
                 args=(gpu_id, self.model_repo_id, self.task_queue, 
-                      self.result_queue, self.stop_event)
+                      self.result_queue, self.stop_event, self.use_plus_pipeline)
             )
             process.start()
             self.worker_processes.append(process)
@@ -174,22 +202,39 @@ class EditMultiGPUManager:
                 print(f"Result processing thread exception: {e}")
                 continue
     
-    def submit_task(self, image, prompt, negative_prompt=" ", seed=42, 
+    def submit_task(self, images, prompt, negative_prompt=" ", seed=42, 
                    true_guidance_scale=4.0, num_inference_steps=50, 
-                   num_images_per_prompt=1, timeout=300):
-        """Submit task and wait for result"""
+                   num_images_per_prompt=1, guidance_scale=1.0, timeout=300):
+        """Submit task and wait for result
+        
+        Args:
+            images: Single image (PIL.Image) or list of images for multi-image editing
+            prompt: Edit instruction prompt
+            negative_prompt: Negative prompt (default: " ")
+            seed: Random seed
+            true_guidance_scale: True guidance scale
+            num_inference_steps: Number of inference steps
+            num_images_per_prompt: Number of output images per prompt
+            guidance_scale: Guidance scale for plus pipeline (default: 1.0)
+            timeout: Task timeout in seconds
+        """
         task_id = f"task_{self.task_counter}_{time.time()}"
         self.task_counter += 1
         
+        # Ensure images is a list
+        if not isinstance(images, list):
+            images = [images]
+        
         task = {
             'task_id': task_id,
-            'image': image,
+            'images': images,
             'prompt': prompt,
             'negative_prompt': negative_prompt,
             'seed': seed,
             'true_guidance_scale': true_guidance_scale,
             'num_inference_steps': num_inference_steps,
-            'num_images_per_prompt': num_images_per_prompt
+            'num_images_per_prompt': num_images_per_prompt,
+            'guidance_scale': guidance_scale
         }
         
         # Create waiting event
