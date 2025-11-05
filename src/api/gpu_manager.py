@@ -69,6 +69,14 @@ class EditGPUWorker:
             num_images_per_prompt = task.get('num_images_per_prompt', 1)
             guidance_scale = task.get('guidance_scale', 1.0)  # For plus pipeline
             
+            # 確保 seed 是有效的整數
+            if seed is None:
+                seed = 42
+            try:
+                seed = int(seed)
+            except (ValueError, TypeError):
+                seed = 42
+            
             generator = torch.Generator(device=self.device).manual_seed(seed)
             
             with torch.cuda.device(self.gpu_id):

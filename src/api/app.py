@@ -507,7 +507,17 @@ async def multi_image_editing(
         if randomize_seed:
             seed = random.randint(0, MAX_SEED)
         elif seed is None:
-            seed = default_params.get('seed', 42)
+            # 確保 seed 總是有值
+            seed = default_params.get('seed') or 42
+        
+        # 確保 seed 是整數
+        try:
+            seed = int(seed)
+        except (ValueError, TypeError):
+            logger.warning(f"Invalid seed value: {seed}, using default 42")
+            seed = 42
+        
+        logger.info(f"Final seed value: {seed}")
         
         true_guidance_scale = true_guidance_scale or default_params.get('true_guidance_scale', 4.0)
         guidance_scale = guidance_scale or default_params.get('guidance_scale', 1.0)
@@ -540,15 +550,18 @@ async def multi_image_editing(
             if submit_images is None:
                 raise HTTPException(status_code=400, detail="No valid images to process")
             
+            # 確保所有參數都是有效的
+            logger.info(f"Submitting with params: seed={seed} (type: {type(seed)}), steps={num_inference_steps}, guidance={true_guidance_scale}")
+            
             result = gpu_manager.submit_task(
                 images=submit_images,
                 prompt=enhanced_prompt,
                 negative_prompt=" ",
-                seed=seed,
-                true_guidance_scale=true_guidance_scale,
-                guidance_scale=guidance_scale,
-                num_inference_steps=num_inference_steps,
-                num_images_per_prompt=num_images_per_prompt,
+                seed=int(seed),  # 確保是整數
+                true_guidance_scale=float(true_guidance_scale),
+                guidance_scale=float(guidance_scale),
+                num_inference_steps=int(num_inference_steps),
+                num_images_per_prompt=int(num_images_per_prompt),
                 timeout=int(os.environ.get("TASK_TIMEOUT", 300))
             )
             
