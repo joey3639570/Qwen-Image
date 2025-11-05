@@ -412,10 +412,22 @@ async def multi_image_editing(
     
     # 檢查是否需要 Plus Pipeline
     if mode <= 5 and not gpu_manager.use_plus_pipeline:
-        logger.warning(f"Mode {mode} requires Plus Pipeline but it's not enabled")
+        logger.warning(f"Mode {mode} requires Plus Pipeline but it's not enabled. Current model: {gpu_manager.model_repo_id}")
         raise HTTPException(
             status_code=400,
-            detail="多圖編輯模式 (1-5) 需要啟用 USE_PLUS_PIPELINE=true 並使用 Qwen-Image-Edit-2509 模型"
+            detail={
+                "error": "Multi-image editing mode requires Plus Pipeline",
+                "mode": mode,
+                "message": f"編輯模式 {mode} 需要啟用 Plus Pipeline",
+                "solution": {
+                    "step1": "設置環境變數: export USE_PLUS_PIPELINE=true",
+                    "step2": f"設置模型: export MODEL_REPO_ID=Qwen/Qwen-Image-Edit-2509",
+                    "step3": "重啟服務",
+                    "current_model": gpu_manager.model_repo_id,
+                    "current_use_plus_pipeline": gpu_manager.use_plus_pipeline
+                },
+                "alternative": f"如果要使用單圖片編輯，請使用模式 6-16 或使用 /edit 端點"
+            }
         )
     
     try:
@@ -510,51 +522,78 @@ async def multi_image_editing(
         
         # 生成增強後的提示詞
         enhanced_prompt = service_result.get('prompt', prompt)
+        logger.info(f"Enhanced prompt: {enhanced_prompt[:100]}...")  # 記錄前100個字符
         
-        # TODO: 實作實際的模型 API 呼叫
-        # 目前先返回模擬回應，待模型端點完成後替換為實際處理
-        # 以下是實際處理的示例代碼（註解掉）：
-        """
-        # 提交任務到 GPU 管理器
-        result = gpu_manager.submit_task(
-            images=pil_images,
-            prompt=enhanced_prompt,
-            negative_prompt=" ",
-            seed=seed,
-            true_guidance_scale=true_guidance_scale,
-            guidance_scale=guidance_scale,
-            num_inference_steps=num_inference_steps,
-            num_images_per_prompt=num_images_per_prompt,
-            timeout=int(os.environ.get("TASK_TIMEOUT", 300))
-        )
+        # 提交任務到 GPU 管理器進行實際處理
+        logger.info(f"Submitting task to GPU manager: mode={mode}, steps={num_inference_steps}, guidance={true_guidance_scale}")
         
-        if result['success']:
-            images_base64 = [pil_to_base64(img) for img in result['images']]
-            return MultiImageEditResponse(
-                success=True,
-                images=images_base64,
-                seed=seed,
-                gpu_id=result.get('gpu_id'),
+        try:
+            # 根據模式決定傳遞單圖片還是圖片列表
+            # 模式 1-5 需要多圖片，模式 6-16 可以使用單圖片
+            if mode <= 5:
+                # 多圖片模式，傳遞列表
+                submit_images = pil_images
+            else:
+                # 單圖片模式，傳遞單個圖片（gpu_manager 會自動轉換為列表）
+                submit_images = pil_images[0] if pil_images else None
+            
+            if submit_images is None:
+                raise HTTPException(status_code=400, detail="No valid images to process")
+            
+            result = gpu_manager.submit_task(
+                images=submit_images,
                 prompt=enhanced_prompt,
-                mode=mode
+                negative_prompt=" ",
+                seed=seed,
+                true_guidance_scale=true_guidance_scale,
+                guidance_scale=guidance_scale,
+                num_inference_steps=num_inference_steps,
+                num_images_per_prompt=num_images_per_prompt,
+                timeout=int(os.environ.get("TASK_TIMEOUT", 300))
             )
-        else:
-            return MultiImageEditResponse(
-                success=False,
-                error=result.get('error', 'Unknown error')
+            
+            logger.info(f"GPU manager returned result: success={result.get('success')}")
+            
+            if result['success']:
+                # 轉換圖片為 base64
+                result_images = result.get('images', [])
+                if not result_images:
+                    logger.warning("GPU manager returned success but no images")
+                    return MultiImageEditResponse(
+                        success=False,
+                        error="GPU processing completed but no images were generated",
+                        prompt=enhanced_prompt,
+                        mode=mode
+                    )
+                
+                logger.info(f"Converting {len(result_images)} images to base64")
+                images_base64 = [pil_to_base64(img) for img in result_images]
+                
+                logger.info(f"Task completed successfully: gpu_id={result.get('gpu_id')}, images_count={len(images_base64)}")
+                
+                return MultiImageEditResponse(
+                    success=True,
+                    images=images_base64,
+                    seed=seed,
+                    gpu_id=result.get('gpu_id'),
+                    prompt=enhanced_prompt,
+                    mode=mode
+                )
+            else:
+                error_msg = result.get('error', 'Unknown error')
+                logger.error(f"GPU processing failed: {error_msg}")
+                return MultiImageEditResponse(
+                    success=False,
+                    error=error_msg,
+                    prompt=enhanced_prompt,
+                    mode=mode
+                )
+        except Exception as e:
+            logger.exception(f"Exception during GPU processing: {str(e)}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Error during GPU processing: {str(e)}"
             )
-        """
-        
-        # 模擬回應（待模型端點完成後移除）
-        return MultiImageEditResponse(
-            success=True,
-            images=None,  # 實際處理時會填充圖片
-            seed=seed,
-            gpu_id=None,
-            prompt=enhanced_prompt,
-            mode=mode,
-            error=None
-        )
         
     except HTTPException as e:
         logger.error(f"HTTPException: {e.detail}")
