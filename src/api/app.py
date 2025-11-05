@@ -383,24 +383,36 @@ async def multi_image_editing(
     - 模式 13-16: ControlNet 控制（需要 controlnet_image）
     """
     import json
+    import logging
+    
+    logger = logging.getLogger(__name__)
+    
+    # 記錄請求信息
+    logger.info(f"Received multi-image-editing request: mode={mode}, images_count={len(images) if images else 0}, prompt_length={len(prompt) if prompt else 0}")
     
     if gpu_manager is None:
+        logger.error("GPU manager not initialized")
         raise HTTPException(status_code=503, detail="GPU manager not initialized")
     
     if edit_service is None:
+        logger.error("Edit service not initialized")
         raise HTTPException(status_code=503, detail="Edit service not initialized")
     
     # 驗證模式參數
     try:
         mode = int(mode)
-    except (ValueError, TypeError):
+        logger.info(f"Mode validated: {mode}")
+    except (ValueError, TypeError) as e:
+        logger.error(f"Invalid mode parameter: {mode}, error: {str(e)}")
         raise HTTPException(status_code=400, detail=f"Invalid mode parameter: {mode}. Must be an integer between 1-16")
     
     if mode < 1 or mode > 16:
+        logger.error(f"Mode out of range: {mode}")
         raise HTTPException(status_code=400, detail=f"Mode must be between 1 and 16, got: {mode}")
     
     # 檢查是否需要 Plus Pipeline
     if mode <= 5 and not gpu_manager.use_plus_pipeline:
+        logger.warning(f"Mode {mode} requires Plus Pipeline but it's not enabled")
         raise HTTPException(
             status_code=400,
             detail="多圖編輯模式 (1-5) 需要啟用 USE_PLUS_PIPELINE=true 並使用 Qwen-Image-Edit-2509 模型"
@@ -409,9 +421,13 @@ async def multi_image_editing(
     try:
         # 驗證圖片列表
         if not images or len(images) == 0:
+            logger.error("No images provided")
             raise HTTPException(status_code=400, detail="At least one image is required")
         
+        logger.info(f"Processing {len(images)} images")
+        
         if len(images) > 5:
+            logger.error(f"Too many images: {len(images)}")
             raise HTTPException(status_code=400, detail=f"Maximum 5 images allowed, got {len(images)}")
         
         # 讀取並驗證圖片
@@ -454,6 +470,7 @@ async def multi_image_editing(
                 raise HTTPException(status_code=400, detail=f"Invalid additional_params JSON format: {str(e)}")
         
         # 使用服務處理請求
+        logger.info(f"Calling edit service with mode={mode}, images_count={len(pil_images)}")
         service_result = edit_service.process_multi_image_edit(
             mode=mode,
             images=pil_images,
@@ -464,9 +481,11 @@ async def multi_image_editing(
         )
         
         if not service_result.get('success'):
+            error_msg = service_result.get('error', 'Unknown error')
+            logger.error(f"Edit service failed: {error_msg}")
             return MultiImageEditResponse(
                 success=False,
-                error=service_result.get('error', 'Unknown error')
+                error=error_msg
             )
         
         # 獲取預設參數
@@ -537,9 +556,11 @@ async def multi_image_editing(
             error=None
         )
         
-    except HTTPException:
+    except HTTPException as e:
+        logger.error(f"HTTPException: {e.detail}")
         raise
     except Exception as e:
+        logger.exception(f"Unexpected error processing multi-image editing: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error processing multi-image editing: {str(e)}")
 
 
