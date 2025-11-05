@@ -6,8 +6,9 @@ import random
 import base64
 import io
 from typing import Optional, List
-from fastapi import FastAPI, File, UploadFile, Form, HTTPException
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Request
 from fastapi.responses import JSONResponse
+from fastapi.exceptions import RequestValidationError
 from PIL import Image
 import numpy as np
 
@@ -94,6 +95,25 @@ async def shutdown_event():
     global gpu_manager
     if gpu_manager:
         gpu_manager.stop()
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    """處理請求驗證錯誤，返回更詳細的錯誤信息"""
+    errors = []
+    for error in exc.errors():
+        field = " -> ".join(str(loc) for loc in error["loc"])
+        message = error["msg"]
+        errors.append(f"{field}: {message}")
+    
+    return JSONResponse(
+        status_code=422,
+        content={
+            "detail": "Validation error",
+            "errors": errors,
+            "message": "請檢查請求參數是否符合要求"
+        }
+    )
 
 
 @app.get("/health", response_model=HealthResponse)
@@ -342,7 +362,7 @@ async def edit_multi_images(
 @app.post("/multi-image-editing", response_model=MultiImageEditResponse)
 async def multi_image_editing(
     images: List[UploadFile] = File(..., description="Input image files (1-5 images)"),
-    mode: int = Form(..., ge=1, le=16, description="編輯模式 (1-16)"),
+    mode: int = Form(..., description="編輯模式 (1-16)"),
     prompt: str = Form(..., description="Edit instruction prompt"),
     controlnet_image: Optional[UploadFile] = File(None, description="ControlNet condition image (for modes 13-16)"),
     seed: Optional[int] = Form(None, description="Random seed"),
@@ -370,6 +390,15 @@ async def multi_image_editing(
     if edit_service is None:
         raise HTTPException(status_code=503, detail="Edit service not initialized")
     
+    # 驗證模式參數
+    try:
+        mode = int(mode)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail=f"Invalid mode parameter: {mode}. Must be an integer between 1-16")
+    
+    if mode < 1 or mode > 16:
+        raise HTTPException(status_code=400, detail=f"Mode must be between 1 and 16, got: {mode}")
+    
     # 檢查是否需要 Plus Pipeline
     if mode <= 5 and not gpu_manager.use_plus_pipeline:
         raise HTTPException(
@@ -378,13 +407,25 @@ async def multi_image_editing(
         )
     
     try:
+        # 驗證圖片列表
+        if not images or len(images) == 0:
+            raise HTTPException(status_code=400, detail="At least one image is required")
+        
+        if len(images) > 5:
+            raise HTTPException(status_code=400, detail=f"Maximum 5 images allowed, got {len(images)}")
+        
         # 讀取並驗證圖片
         pil_images = []
-        for img_file in images:
-            image_data = await img_file.read()
-            pil_image = Image.open(io.BytesIO(image_data))
-            pil_image = validate_image(pil_image)
-            pil_images.append(pil_image)
+        for idx, img_file in enumerate(images):
+            try:
+                image_data = await img_file.read()
+                if not image_data:
+                    raise HTTPException(status_code=400, detail=f"Image {idx + 1} is empty")
+                pil_image = Image.open(io.BytesIO(image_data))
+                pil_image = validate_image(pil_image)
+                pil_images.append(pil_image)
+            except Exception as e:
+                raise HTTPException(status_code=400, detail=f"Failed to process image {idx + 1}: {str(e)}")
         
         # 讀取 ControlNet 條件圖（如果提供）
         controlnet_pil_image = None
@@ -398,15 +439,19 @@ async def multi_image_editing(
         if text_params_json:
             try:
                 text_params = json.loads(text_params_json)
-            except json.JSONDecodeError:
-                raise HTTPException(status_code=400, detail="Invalid text_params JSON format")
+                if not isinstance(text_params, dict):
+                    raise HTTPException(status_code=400, detail="text_params_json must be a JSON object")
+            except json.JSONDecodeError as e:
+                raise HTTPException(status_code=400, detail=f"Invalid text_params JSON format: {str(e)}")
         
         additional_params = None
         if additional_params_json:
             try:
                 additional_params = json.loads(additional_params_json)
-            except json.JSONDecodeError:
-                raise HTTPException(status_code=400, detail="Invalid additional_params JSON format")
+                if not isinstance(additional_params, dict):
+                    raise HTTPException(status_code=400, detail="additional_params_json must be a JSON object")
+            except json.JSONDecodeError as e:
+                raise HTTPException(status_code=400, detail=f"Invalid additional_params JSON format: {str(e)}")
         
         # 使用服務處理請求
         service_result = edit_service.process_multi_image_edit(
